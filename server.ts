@@ -76,7 +76,7 @@ async function startServer() {
         return res.status(400).json({ success: false, error: '지원되는 이미지 파일(JPG, PNG, WEBP, GIF)이 아닙니다.' });
       }
 
-      const imagesDir = path.resolve(process.env.IMAGE_STORAGE_DIR || path.resolve(process.cwd(), 'public', 'images'));
+      const imagesDir = path.resolve(process.cwd(), 'public', 'images');
       fs.mkdirSync(imagesDir, { recursive: true });
 
       const safeAptId = apartmentId ? String(apartmentId).replace(/[^a-zA-Z0-9-_]/g, '') : '';
