@@ -81,12 +81,20 @@ export const EditImageModal: React.FC<EditImageModalProps> = ({
             apartmentId: apartment.id,
           }),
         });
-        const data = await res.json();
-        console.log('[Client] Submit upload response:', data);
-        if (data.success && data.url) {
+        const data = await res.json().catch(() => ({}));
+        console.log('[Client] Submit upload response:', res.status, data);
+        if (res.ok && data.success && typeof data.url === 'string' && data.url) {
+          // Verify the returned URL can actually serve the uploaded image before saving its reference.
+          const imageCheck = await fetch(data.url, { method: 'GET', cache: 'no-store' });
+          const contentType = imageCheck.headers.get('content-type') || '';
+          if (!imageCheck.ok || !contentType.startsWith('image/')) {
+            setUploadError('이미지 파일은 전송됐지만 서버에서 다시 불러오지 못했습니다. 저장소 설정과 이미지 URL을 확인해 주세요.');
+            setUploading(false);
+            return;
+          }
           finalImageUrl = data.url;
         } else {
-          setUploadError(data.error || '이미지 서버 저장 중 오류가 발생했습니다.');
+          setUploadError(data.error || `이미지 서버 저장 실패 (HTTP ${res.status})`);
           setUploading(false);
           return;
         }
@@ -162,7 +170,7 @@ export const EditImageModal: React.FC<EditImageModalProps> = ({
             {uploading && (
               <div className="flex items-center gap-2 text-indigo-600 font-bold py-1">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>서버에 영구 이미지 업로드 중...</span>
+                <span>서버에 이미지 저장 및 확인 중...</span>
               </div>
             )}
             {uploadError && (

@@ -38,57 +38,85 @@ async function startServer() {
     }
   });
 
-  // API to upload field/page images and sync across PC & mobile
+  // API to upload field/page images and sync across PC & mobile.
+  // Writes the new file first and only removes old apartment images after the write succeeds.
   app.post('/api/upload-image', (req, res) => {
+    let tempPath = '';
     try {
-      const { imageBase64, filename, apartmentId } = req.body;
-      if (!imageBase64) {
-        console.error('[Server] /api/upload-image error: No image base64 provided');
-        return res.status(400).json({ error: 'No image base64 provided' });
+      const { imageBase64, filename, apartmentId } = req.body ?? {};
+      if (typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+        return res.status(400).json({ success: false, error: '이미지 데이터가 없습니다.' });
+      }
+
+      const dataUrlMatch = imageBase64.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([\s\S]+)$/i);
+      const base64Data = dataUrlMatch ? dataUrlMatch[2] : imageBase64;
+      const mimeType = dataUrlMatch?.[1]?.toLowerCase();
+      const extByMime: Record<string, string> = {
+        'image/jpeg': '.jpg',
+        'image/jpg': '.jpg',
+        'image/png': '.png',
+        'image/webp': '.webp',
+        'image/gif': '.gif',
+      };
+      const extByFilename: Record<string, string> = {
+        '.jpg': '.jpg', '.jpeg': '.jpg', '.png': '.png', '.webp': '.webp', '.gif': '.gif',
+      };
+      const requestedExt = typeof filename === 'string' ? path.extname(filename).toLowerCase() : '';
+      const ext = (mimeType && extByMime[mimeType]) || extByFilename[requestedExt] || '.jpg';
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (!buffer.length) {
+        return res.status(400).json({ success: false, error: '이미지 데이터가 비어 있거나 올바르지 않습니다.' });
+      }
+      // Reject obviously non-image payloads rather than saving arbitrary data as an image.
+      const isJpeg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      const isPng = buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const isGif = buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'));
+      const isWebp = buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+      if (!(isJpeg || isPng || isGif || isWebp)) {
+        return res.status(400).json({ success: false, error: '지원되는 이미지 파일(JPG, PNG, WEBP, GIF)이 아닙니다.' });
       }
 
       const imagesDir = path.resolve(process.cwd(), 'public', 'images');
-      if (!fs.existsSync(imagesDir)) {
-        fs.mkdirSync(imagesDir, { recursive: true });
-      }
-
-      let ext = '.jpg';
-      if (filename && typeof filename === 'string') {
-        const parsedExt = path.extname(filename).toLowerCase();
-        if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(parsedExt)) {
-          ext = parsedExt;
-        }
-      }
+      fs.mkdirSync(imagesDir, { recursive: true });
 
       const safeAptId = apartmentId ? String(apartmentId).replace(/[^a-zA-Z0-9-_]/g, '') : '';
+      if (apartmentId && !safeAptId) {
+        return res.status(400).json({ success: false, error: '아파트 식별자가 올바르지 않습니다.' });
+      }
+      const cleanName = safeAptId
+        ? `${safeAptId}${ext}`
+        : `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}${ext}`;
+      const targetPath = path.join(imagesDir, cleanName);
+      tempPath = path.join(imagesDir, `.${cleanName}.${process.pid}.${Date.now()}.tmp`);
+
+      // Atomic replacement: preserve the previous image if writing the new one fails.
+      fs.writeFileSync(tempPath, buffer, { flag: 'wx' });
+      if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size !== buffer.length) {
+        throw new Error('서버에 저장된 이미지 검증에 실패했습니다.');
+      }
+      fs.renameSync(tempPath, targetPath);
+      tempPath = '';
+
+      // Remove older extensions only after the new image has been saved successfully.
       if (safeAptId) {
-        const files = fs.readdirSync(imagesDir);
-        for (const f of files) {
-          if (f.startsWith(`${safeAptId}.`)) {
-            try {
-              fs.unlinkSync(path.join(imagesDir, f));
-            } catch {}
+        for (const oldName of fs.readdirSync(imagesDir)) {
+          if (oldName !== cleanName && oldName.startsWith(`${safeAptId}.`) && /\.(jpg|jpeg|png|webp|gif)$/i.test(oldName)) {
+            try { fs.unlinkSync(path.join(imagesDir, oldName)); } catch (cleanupError) {
+              console.warn('[Server] Old image cleanup failed:', cleanupError);
+            }
           }
         }
       }
-      const cleanName = safeAptId ? `${safeAptId}.jpg` : `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}.jpg`;
-      const targetPath = path.join(imagesDir, cleanName);
-      
-      const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-      const buffer = Buffer.from(base64Data, 'base64');
-      fs.writeFileSync(targetPath, buffer);
-
-      // Verify file actually exists and is non-empty
-      if (!fs.existsSync(targetPath) || fs.statSync(targetPath).size === 0) {
-        throw new Error('File storage verification failed on server disk');
-      }
 
       const imageUrl = `/images/${cleanName}`;
-      console.log(`[Server] Successfully saved and verified image for apartment ${safeAptId || 'general'} at ${targetPath} -> URL: ${imageUrl} (${buffer.length} bytes)`);
-      return res.json({ success: true, url: imageUrl });
+      console.log(`[Server] Image saved and verified: ${imageUrl} (${buffer.length} bytes)`);
+      return res.json({ success: true, url: imageUrl, size: buffer.length });
     } catch (err: any) {
+      if (tempPath) {
+        try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
+      }
       console.error('[Server] Failed to save image:', err);
-      return res.status(500).json({ error: err.message });
+      return res.status(500).json({ success: false, error: '서버 이미지 저장에 실패했습니다. 서버 로그를 확인해 주세요.' });
     }
   });
 
