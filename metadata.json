@@ -1,0 +1,6 @@
+{
+  "name": "마을 아파트 차단기 현황 및 진입 안내",
+  "description": "마을별 아파트 차량 차단기 설치 여부를 확인하고 차단기 보유 아파트를 PDF 안내 페이지와 바로 연결하여 확인하는 서비스",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
